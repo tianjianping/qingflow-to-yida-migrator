@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>轻流 -> 宜搭 迁移控制台</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">-></span>
+      <div>
+        <h1>轻流 → 宜搭 迁移控制台</h1>
+        <p class="sub">选择表单后，按引导依次完成：准备数据 → 更新数据 → 迁移附件</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="btn-refresh" class="btn ghost">↻ 刷新</button>
+      <button id="btn-settings" class="btn ghost">⚙ 设置</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左侧栏 -->
+    <aside class="sidebar">
+      <div class="app-filter">
+        <select id="app-filter" class="af-select"></select>
+      </div>
+      <div id="form-list" class="form-list">
+        <div class="empty">加载中...</div>
+      </div>
+      <div class="sidebar-foot">
+        <button id="btn-add" class="btn primary" style="width:100%">+ 新建表单</button>
+      </div>
+    </aside>
+
+    <!-- 右侧主体 -->
+    <section class="main-area">
+      <div id="no-form" class="empty big">
+        ← 从左侧栏选择一个表单
+      </div>
+
+      <div id="content" class="hidden">
+        <!-- 表单头部 -->
+        <div class="form-header">
+          <div>
+            <h2 id="fh-name">--</h2>
+            <p id="fh-meta" class="meta"></p>
+          </div>
+          <div class="fh-badges" id="fh-badges"></div>
+        </div>
+
+        <!-- 操作流程引导 -->
+        <div class="flow-steps" id="flow-steps">
+          <div class="flow-step" data-scroll="card-data">
+            <span class="fs-dot" id="fs-dot-1">1</span>
+            <span class="fs-label">准备数据</span>
+            <span class="fs-state" id="fs-state-1">未开始</span>
+          </div>
+          <span class="flow-line"></span>
+          <div class="flow-step" data-scroll="card-data" data-action="update">
+            <span class="fs-dot" id="fs-dot-2">2</span>
+            <span class="fs-label">更新数据</span>
+            <span class="fs-state" id="fs-state-2">待准备</span>
+          </div>
+          <span class="flow-line"></span>
+          <div class="flow-step" data-scroll="card-attach" data-action="attach">
+            <span class="fs-dot" id="fs-dot-3">3</span>
+            <span class="fs-label">迁移附件</span>
+            <span class="fs-state" id="fs-state-3">待准备</span>
+          </div>
+        </div>
+
+        <!-- 数据迁移面板 -->
+        <div class="card" id="card-data">
+          <div class="card-head" data-toggle="card-data">
+            <h3><span class="step-tag">步骤 1·2</span>数据迁移</h3>
+            <span class="card-toggle">▾</span>
+          </div>
+          <div class="card-body">
+            <!-- 数据准备状态 -->
+            <div class="data-ready">
+              <div class="data-status">
+                <span id="prepare-status" class="badge todo">未准备</span>
+                <span id="prepare-detail" class="meta"></span>
+                <button id="btn-prepare" class="btn tiny">重新准备数据</button>
+              </div>
+              <div id="diff-stats" class="diff-stats hidden"></div>
+              <div class="dm-toolbar">
+                <div class="dm-limit">
+                  <label>写入数量限制
+                    <input type="number" id="dm-limit" min="0" value="0" placeholder="0=不限">
+                  </label>
+                  <label class="chk"><input type="checkbox" id="dm-commit">真实写入</label>
+                </div>
+                <button id="btn-update" class="btn primary" disabled>
+                  更新数据
+                  <small>按差异清单写入宜搭</small>
+                </button>
+              </div>
+              <p class="hint">点击「准备数据」拉取最新数据（轻流数据 / 宜搭存量 / 差异清单 / 格式转换），完成后统计即为最新。勾选「真实写入」后点击「更新数据」才会真正写入宜搭，否则仅预览请求。每次写入后需重新准备数据才能再次更新（防止重复插入）。</p>
+            </div>
+            <!-- 高级操作：分阶段执行 -->
+            <details id="adv-steps" class="adv">
+              <summary>高级操作（分阶段运行，供排查使用）</summary>
+              <div class="steps" id="steps"></div>
+            </details>
+          </div>
+        </div>
+
+        <!-- 附件迁移面板 -->
+        <div class="card" id="card-attach">
+          <div class="card-head" data-toggle="card-attach">
+            <h3><span class="step-tag">步骤 3</span>附件迁移</h3>
+            <span class="card-toggle">▾</span>
+          </div>
+          <div class="card-body">
+            <div id="att-stats" class="att-stats hidden"></div>
+            <div id="att-no-data" class="empty small">此表单无附件字段</div>
+            <div id="att-controls" class="hidden">
+              <div class="att-ops">
+                <div class="att-row">
+                  <label class="att-limit">写入数量限制
+                    <input type="number" id="att-limit" min="0" value="0" placeholder="0=不限">
+                  </label>
+                  <label class="chk"><input type="checkbox" id="att-commit"><span class="red">写入宜搭</span></label>
+                </div>
+                <div class="att-note">附件仅迁移「宜搭已有对应记录」的数据（轻流数据ID 已存在于宜搭存量），不为不存在的宜搭数据上传附件。未勾选「写入宜搭」时只做下载+上传 VPS 的预取验证，不会改动宜搭。</div>
+                <div class="att-btns">
+                  <button class="btn" id="att-peek" disabled>预览</button>
+                  <button class="btn danger" id="att-migrate" disabled>迁移附件</button>
+                  <button class="btn ghost" id="att-cancel" disabled>取消</button>
+                </div>
+              </div>
+              <div class="att-job-stats" id="att-job-stats"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 共享控制台 -->
+        <div class="card" id="card-console">
+          <div class="card-head">
+            <h3>运行输出</h3>
+            <div class="console-head-right">
+              <span id="console-status" class="badge idle">空闲</span>
+              <button id="btn-clear" class="btn tiny ghost">清空</button>
+            </div>
+          </div>
+          <pre id="console" class="console"></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 新增/编辑表单弹窗 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="modal-title">新建表单</h3>
+        <button id="modal-close" class="btn tiny ghost">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="lr"><span class="lbl">表单名称 *</span><input id="f-name" type="text" placeholder="例如：客户信息表" /></label>
+        <label class="lr"><span class="lbl">AppKey *</span><input id="f-appkey" type="text" placeholder="例如：your_app_key" /></label>
+        <label class="lr"><span class="lbl">表单UUID</span><input id="f-formuuid" type="text" placeholder="FORM-xxx" /></label>
+        <label class="lr"><span class="lbl">宜搭应用</span><select id="f-appid" class="lr-select"></select></label>
+        <label class="lr"><span class="lbl">备注</span><input id="f-note" type="text" placeholder="可选" /></label>
+        <p class="hint">表单 UUID 暂时不知道可以之后补。</p>
+      </div>
+      <div class="modal-foot">
+        <button id="modal-cancel" class="btn ghost">取消</button>
+        <button id="modal-save" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <h3>设置</h3>
+        <button id="settings-close" class="btn tiny ghost">✕</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="tab active" data-tab="apps">宜搭应用</button>
+        <button class="tab" data-tab="system">系统</button>
+      </div>
+      <div class="modal-body">
+        <div class="tab-pane" id="pane-apps">
+          <div class="set-group">已保存的宜搭应用</div>
+          <div id="app-list" class="app-list"></div>
+          <div class="set-group">添加 / 编辑</div>
+          <label class="lr"><span class="lbl">名称</span><input id="a-name" type="text" placeholder="例如：生产环境" autocomplete="off" /></label>
+          <label class="with-eye lr">应用类型
+            <span class="eye-wrap"><input id="a-appType" type="text" placeholder="APP_xxx" autocomplete="off" /><button type="button" class="eye" data-eye="a-appType">显</button></span>
+          </label>
+          <label class="with-eye lr">系统令牌
+            <span class="eye-wrap"><input id="a-systemToken" type="password" placeholder="systemToken" autocomplete="off" /><button type="button" class="eye" data-eye="a-systemToken">显</button></span>
+          </label>
+          <div class="set-group sub">默认写入行为</div>
+          <div class="chk-row">
+            <label class="chk"><input type="checkbox" id="a-commit" /> 默认提交</label>
+            <label class="chk"><input type="checkbox" id="a-force" /> 默认强制更新</label>
+          </div>
+          <div class="row">
+            <button id="a-submit" class="btn primary">+ 添加应用</button>
+            <button id="a-cancel" class="btn ghost hidden">取消编辑</button>
+          </div>
+        </div>
+        <div class="tab-pane hidden" id="pane-system">
+          <div class="set-group">敏感信息</div>
+          <label class="with-eye lr">用户ID
+            <span class="eye-wrap"><input id="s-userId" type="password" placeholder="Yida 用户ID" autocomplete="off" /><button type="button" class="eye" data-eye="s-userId">显</button></span>
+          </label>
+          <p class="hint">「写入数量限制」位于对应操作面板内：数据迁移面板限制写入条数，附件迁移面板限制附件处理条数（0 表示不限制，修改后自动保存）。</p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="settings-cancel" class="btn ghost">取消</button>
+        <button id="settings-save" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
