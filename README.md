@@ -114,13 +114,11 @@ migration/
 - **凭证本地化**：密钥只存在于你的 `config/credentials.json` 或环境变量，不硬编码、不提交仓库。
 - **数据直连**：迁移过程在「你的本机 / 私有服务器」与官方 API 之间直接发生，开发方不接触、不留存任何数据。
 - **附件安全**：上传接口强制 Token 校验、扩展名白名单、路径穿越防护；文件公网访问带防盗链。
-- 详细合规分析与风险规避见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | 法律合规分析与发布风险规避 |
 | [docs/vps-deploy-guide.md](docs/vps-deploy-guide.md) | VPS 附件托管部署指南 |
 | [docs/attachment-migration-plan.md](docs/attachment-migration-plan.md) | 附件迁移架构与实施方案 |
 | [docs/audit-report.md](docs/audit-report.md) | 审计报告与修复记录 |
