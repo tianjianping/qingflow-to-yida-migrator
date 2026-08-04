@@ -35,6 +35,9 @@ varName_componentId_对应表.csv
 varName_componentId_对应表.html
 表单源码
 
+# ---- 内部 API 参考文档（第三方平台文档，勿入库）----
+需要的API及辅助说明文件/
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
