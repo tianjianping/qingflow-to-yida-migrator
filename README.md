@@ -2,6 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](requirements.txt)
+[![Release](https://img.shields.io/badge/Release-v0.2.0-2f6fed.svg)](CHANGELOG.md)
 
 > **Disclaimer / 免责声明**
 >
