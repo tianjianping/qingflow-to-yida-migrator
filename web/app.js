@@ -270,24 +270,7 @@
     el("fh-meta").textContent =
       "appKey: " + (f.appKey || "--") + " | formUuid: " + (f.formUuid || "(无)") +
       " | 原始: " + (f.rawCount != null ? f.rawCount : "--") + " | 已写入: " + done + (fail ? " (失败 " + fail + ")" : "");
-    renderSetupStatus(f);
     renderStages(f);
-  }
-
-  // 「建立表单」区块状态：配置 / 映射是否就绪
-  function renderSetupStatus(f) {
-    var badge = el("setup-status"), detail = el("setup-detail");
-    if (!badge) return;
-    if (f.configExists && f.mappingExists) {
-      badge.className = "badge done"; badge.textContent = "已配置";
-      if (detail) detail.textContent = "映射表就绪，可开始准备数据";
-    } else if (f.configExists) {
-      badge.className = "badge todo"; badge.textContent = "缺映射";
-      if (detail) detail.textContent = "映射表未生成，准备数据时将自动执行字段映射";
-    } else {
-      badge.className = "badge failed"; badge.textContent = "未配置";
-      if (detail) detail.textContent = "请点击「编辑」补充 AppKey / 表单UUID";
-    }
   }
 
   function renderStages(f) {
@@ -334,7 +317,7 @@
     if (!state.selected) return;
     if (state.prepare.status === "running") return;
     mode = mode || "all";
-    state.prepare = { status: "running", jobId: null };
+    state.prepare = { status: "running", jobId: null, mode: mode };
     stopDataPoll();
     setPrepareUi();
     el("console").textContent = "";
@@ -389,11 +372,17 @@
       setConsoleStatus(ok ? "done" : "failed", ok ? "数据准备完成" : "数据准备失败 (退出码 " + (j.returncode || "?") + ")");
       setPrepareUi();
       if (ok) {
+        // 拉取数据(fetch)仅缓存源数据，不做字段对齐 -> 不自动预检（避免旧映射产生误导性工作清单）
+        var hasAlign = state.prepare.mode !== "fetch";
         // 刷新最新表单状态与附件统计（绕过缓存）
         loadForms().then(function () {
           loadAttachStats(state.selected, true);
           setPrepareUi(); // 用最新 diff 数据渲染差异统计
-          loadPreflight(state.selected); // 准备完成后自动预检
+          if (hasAlign) {
+            loadPreflight(state.selected); // 准备/格式化完成后自动预检
+          } else {
+            consoleData("源数据已拉取到本地缓存。请点击「格式化数据」完成字段对齐与三方对账后，再查看迁移预检。");
+          }
         });
       } else {
         toast("数据准备失败，请查看控制台日志", "err");
@@ -557,9 +546,12 @@
       badge.className = "badge " + (map[st] ? map[st][0] : "todo");
       badge.textContent = map[st] ? map[st][1] : "未知";
     }
-    // 准备按钮文案
+    // 准备按钮文案：① 卡片内固定「准备数据」；「重新准备数据」已移至写入侧与写入数据对齐
     var pb = el("btn-prepare");
-    if (pb) pb.textContent = (st === "idle") ? "准备数据" : "重新准备数据";
+    if (pb) pb.textContent = "准备数据";
+    // 「重新准备数据」可用性：已准备过（done/stale/failed）才可重新执行
+    var reprepareBtn = el("btn-reprepare");
+    if (reprepareBtn) reprepareBtn.disabled = st === "idle" || st === "running";
     // 更新按钮可用性：仅「已就绪」可用（stale/failed/idle 禁用）
     var ready = st === "done";
     var updateBtn = el("btn-update");
@@ -1391,6 +1383,9 @@
   }
   var updateBtn = el("btn-update");
   if (updateBtn) updateBtn.onclick = updateData;
+  // 「重新准备数据」与「写入数据」对齐：修改宜搭表单后，重新拉取/对齐并生成最新差异
+  var reprepareBtn = el("btn-reprepare");
+  if (reprepareBtn) reprepareBtn.onclick = function () { runPrepare("all"); };
   var dmLimit = el("dm-limit");
   if (dmLimit) {
     dmLimit.value = state.settings.limit || 0;
@@ -1407,12 +1402,6 @@
       saveSettingsPayload({ attLimit: state.settings.attLimit });
     };
   }
-  // 「建立表单」区块：编辑当前表单
-  var editFormBtn = el("btn-edit-form");
-  if (editFormBtn) editFormBtn.onclick = function () {
-    var f = state.forms.find(function (x) { return x.name === state.selected; });
-    if (f) openEditModal(f);
-  };
 
   setupCards();
 

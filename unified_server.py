@@ -743,17 +743,19 @@ def build_stage_cmds(stage_key, form, commit=False, limit=None, force=False,
 
 def build_prepare_cmds(form, mode="all", skip_fetch=False, force_full=False,
                        refresh_yida=False):
-    """数据准备命令（拉取/格式化解耦）。
+    """数据准备命令（拉取数据与格式化解耦）。
 
     mode:
       - "all"      : 00+01+02+02b+02c+02d+03（默认，完整准备）
-      - "fetch"    : 00+01+02+02c+02d（仅拉取数据+三方对账，不改映射、不转换）
-      - "transform": 02b+03（仅字段对齐+格式化，复用已拉取的 raw/映射产物）
+      - "fetch"    : 00+01+02+02c（仅拉取源数据到本地缓存：轻流数据 + 宜搭结构 + 宜搭存量，
+                     不做字段对齐、不对账、不转换）
+      - "transform": 02b+02d+03（仅本地规则建立：字段对齐 + 三方对账 + 格式化，
+                     复用已拉取的 raw/映射产物，不进行任何数据拉取动作）
     """
     if mode == "fetch":
-        steps = ["00", "01", "02", "02c", "02d"]
+        steps = ["00", "01", "02", "02c"]
     elif mode == "transform":
-        steps = ["02b", "03"]
+        steps = ["02b", "02d", "03"]
     else:
         steps = ["00", "01", "02", "02b", "02c", "02d", "03"]
     cmds = []
@@ -785,10 +787,11 @@ def _job_emit(job, text):
         job["truncated"] = job.get("truncated", 0) + drop
 
 
-def start_data_job(form, cmds):
+def start_data_job(form, cmds, mode=None):
     jid = _next_data_job_id()
     job = {
         "id": jid, "type": "data", "form": form, "status": "running",
+        "mode": mode or "all",
         "output": [], "truncated": 0, "returncode": None, "started": time.time(),
         "finished": None, "currentStep": cmds[0][0] if cmds else "",
         "logPath": None,
@@ -807,6 +810,11 @@ def _data_worker(job, cmds):
     overall_rc = 0
     try:
         with open(log_path, "w", encoding="utf-8") as lf:
+            # 模式标注：让 job 日志/控制台一眼可辨本次任务的模式与步骤序列
+            steps_desc = " → ".join(s for s, _ in cmds)
+            mode_line = (f"\n[任务模式] {job['mode']}（{'拉取数据' if job['mode']=='fetch' else '格式化数据' if job['mode']=='transform' else '完整准备'}）: "
+                         f"{steps_desc}\n")
+            _job_emit(job, mode_line); lf.write(mode_line)
             for step_key, cmd in cmds:
                 job["currentStep"] = step_key
                 header = f"\n{'='*60}\n> 步骤 {step_key}  {STEP_DEFS[step_key]['desc']}\n{'='*60}\n"
@@ -1498,7 +1506,8 @@ def api_forms():
             data.get("formUuid"), data.get("note"),
             _to_int(data.get("appId"), 0))
         if not ok: return jsonify({"ok": False, "msg": msg}), 400
-        jid = start_data_job(data.get("name"), [("00", build_cmd("00", data.get("name")))])
+        jid = start_data_job(data.get("name"), [("00", build_cmd("00", data.get("name")))],
+                             mode="config")
         return jsonify({"ok": True, "msg": msg, "jobId": jid})
     if request.method == "PUT":
         ok, msg = update_form_in_registry(
@@ -1512,7 +1521,7 @@ def api_forms():
             if old_cfg.exists():
                 try: old_cfg.unlink()
                 except Exception: pass
-        jid = start_data_job(new_n, [("00", build_cmd("00", new_n))])
+        jid = start_data_job(new_n, [("00", build_cmd("00", new_n))], mode="config")
         return jsonify({"ok": True, "msg": msg, "jobId": jid})
     if request.method == "DELETE":
         ok, msg = delete_form_from_registry(data.get("name"))
@@ -1683,7 +1692,7 @@ def api_run():
                     force=bool(data.get("force", ao["force"])),
                     skip_fetch=bool(data.get("skipFetch", False)),
                     force_full=bool(data.get("forceFull", False)))
-    jid = start_data_job(form, [(step, cmd)])
+    jid = start_data_job(form, [(step, cmd)], mode="single-step")
     return jsonify({"ok": True, "jobId": jid})
 
 @app.route("/api/run-stage", methods=["POST"])
@@ -1706,7 +1715,7 @@ def api_run_stage():
                             skip_fetch=bool(data.get("skipFetch", False)),
                             force_full=bool(data.get("forceFull", False)),
                             refresh_yida=bool(data.get("refreshYida", False)))
-    jid = start_data_job(form, cmds)
+    jid = start_data_job(form, cmds, mode="stage")
     return jsonify({"ok": True, "jobId": jid})
 
 @app.route("/api/run-all", methods=["POST"])
@@ -1734,9 +1743,11 @@ def api_prepare():
     """数据准备：拉取数据与格式化解耦。
 
     mode:
-      - all(默认) : 00+01+02+02b+02c+02d+03 完整准备（拉取+对齐+对账+转换）
-      - fetch     : 00+01+02+02c+02d 仅拉取（轻流数据/宜搭结构/宜搭存量）+ 三方对账
-      - transform : 02b+03 仅字段对齐+格式化（复用已拉取产物，宜搭修改后配合 fetch 使用）
+      - all(默认)      : 00+01+02+02b+02c+02d+03 完整准备（拉取+对齐+对账+转换）
+      - fetch          : 00+01+02+02c 仅拉取源数据到本地缓存（轻流数据/宜搭结构/宜搭存量），
+                         不做字段对齐、不对账、不转换
+      - transform      : 02b+02d+03 仅本地规则建立（字段对齐+三方对账+格式化），
+                         复用已拉取的 raw/映射产物，不进行任何数据拉取动作
     不含写入(04)，不产生任何宜搭侧修改。"""
     data = request.get_json(silent=True) or {}
     form = data.get("form")
@@ -1750,7 +1761,7 @@ def api_prepare():
         force_full=bool(data.get("forceFull", False)),
         refresh_yida=bool(data.get("refreshYida", False)),
     )
-    jid = start_data_job(form, cmds)
+    jid = start_data_job(form, cmds, mode=mode)
     return jsonify({"ok": True, "jobId": jid,
                     "mode": mode,
                     "steps": [s for s, _ in cmds]})

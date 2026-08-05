@@ -153,20 +153,17 @@ body {
 .att-bar { height: 100%; background: linear-gradient(90deg, #2f6fed, #4f9cf9); transition: width .4s ease; }
 .att-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #1c2b4a; }
 
-/* ---- 数据迁移面板工具条 ---- */
+/* ---- 数据迁移面板工具条（准备数据 / 写入数据 两侧对齐） ---- */
 .dm-toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px dashed var(--border); }
 .dm-limit { display: flex; align-items: flex-end; gap: 8px; }
 .dm-limit label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .dm-limit input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; width: 80px; }
+.dm-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.dm-btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* ---- 数据准备（选表单后自动执行） ---- */
-.data-ready { margin-bottom: 12px; }
-.data-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
-.fetch-opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; color: var(--text-dim, #888); }
+.fetch-opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim, #888); }
 .fetch-opts .chk { margin: 0; }
-.data-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; }
-.data-actions .da-label { color: var(--text-dim, #888); }
-.data-status .meta { margin: 0; flex: 1; min-width: 160px; }
 .diff-stats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #f8f9fd; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .diff-chip { font-size: 12px; color: var(--muted); background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; }
 .diff-chip b { color: var(--primary); font-size: 13px; }

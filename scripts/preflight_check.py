@@ -60,6 +60,23 @@ def build_manual_worklist(form_name, cfg, rows, matched, unmatched):
         if qid:
             matched_qids.add(qid)
 
+    # 02 最新映射草稿中的宜搭字段标题集合：判断「字段已在宜搭创建但映射未承接」。
+    # 用户手动修改宜搭表单（新增/删除字段）并刷新结构后，草稿反映最新结构，
+    # 据此避免把「已在宜搭存在、只是尚未对齐」的字段误报为需「新增」。
+    draft_path = BASE_DIR / (cfg.get("mappingDraftFile") or f"mappings/{form_name}_mapping_draft.csv")
+    yida_has = set()
+    if draft_path.exists():
+        with open(draft_path, encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                r = {k.strip(): (v or "").strip() for k, v in r.items()}
+                lbl = r.get("宜搭字段名", "")
+                if lbl:
+                    yida_has.add(lbl)
+    # 别名反向展开：labelAliases = {宜搭标题: 轻流标题} -> {轻流标题: [宜搭标题]}
+    alias_rev = {}
+    for yl, ql in (cfg.get("labelAliases") or {}).items():
+        alias_rev.setdefault(ql, []).append(yl)
+
     # 轻流重名字段（同标题多个 queId）：标题匹配无法一一对应，需人工核对
     qf_title_qids = {}
     for qf in qf_fields:
@@ -84,6 +101,7 @@ def build_manual_worklist(form_name, cfg, rows, matched, unmatched):
 
     # 2) 轻流有字段、宜搭无可承接 -> 在宜搭新增
     sys_que_ids = {"0", "-17", "1", "2"}
+    align_pending = 0
     for qf in qf_fields:
         if qf.get("parentQueId"):
             continue  # 子表单子字段单独处理
@@ -97,11 +115,23 @@ def build_manual_worklist(form_name, cfg, rows, matched, unmatched):
         # 轻流重名字段：自动匹配无法一一对应，归入「检查」而非「新增」
         if title in dup_qf_titles:
             continue
+        # 轻流字段已在宜搭（最新草稿）中存在：字段已创建，仅需 02b 对齐，不要求「新增」
+        if any(t in yida_has for t in [title] + alias_rev.get(title, [])):
+            align_pending += 1
+            continue
         worklist.append({
             "action": "新增",
             "field": title,
             "detail": f"轻流字段「{title}」(queId={qid}, 类型 {qf.get('queType')}) 在宜搭无同名/别名可承接字段，"
                       f"该字段数据将被忽略。如需迁移请在宜搭创建标题为「{title}」的字段（或配置 labelAliases 别名）后重新运行 02b。",
+        })
+    if align_pending:
+        worklist.append({
+            "action": "检查",
+            "field": f"{align_pending} 个字段",
+            "detail": f"有 {align_pending} 个轻流字段已在宜搭表单中存在（标题一致），但映射表尚未承接。"
+                      f"请点击「格式化数据」执行字段对齐（02b）后重新查看预检；"
+                      f"若对齐后仍无对应行，请核对标题全半角/空格差异或配置 labelAliases 别名。",
         })
 
     # 3) 必填系统字段缺失（编号 queId=0 / 数据ID queId=-17）
