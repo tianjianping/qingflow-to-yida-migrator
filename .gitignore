@@ -3,37 +3,43 @@
 # 原则：本地保留全部真实数据与配置，仓库只推代码与示例文件
 # ============================================================
 
+# ---- 开发工作区（本地保留全部真实数据/配置，不入库）----
+# migration/ 是本地开发与运行目录，发布内容以仓库根目录为准
+migration/
+
 # ---- 项目内部数据 ----
 .workbuddy/
 .trae/
 
 # ---- 运行产物与业务数据（本地保留，不入库）----
-migration/data/
+data/
 *.log
 
 # ---- 真实密钥与配置（本地保留，不入库）----
-migration/config/credentials.json
-migration/config/settings.json
-migration/config/表单对照表.csv
-migration/config/forms/*.json
-!migration/config/forms/示例表单.json
+config/credentials.json
+config/settings.json
+config/表单对照表.csv
+config/forms/*.json
+!config/forms/示例表单.json
 
 # ---- 真实字段映射表（本地保留，不入库）----
-migration/mappings/*.csv
-!migration/mappings/*.example.csv
+mappings/*.csv
+!mappings/*.example.csv
 
-# ---- 内部文档与旧版归档（含真实业务信息，本地保留）----
-migration/WORK_SUMMARY_*.md
-migration/archive/
-migration/docs/COMPLIANCE.md
+# ---- 映射备份与结构指纹（含真实字段 ID，本地保留）----
+*.bak
+*_yida_schema_hash.json
 
-# ---- 内部测试脚本（含真实字段 ID，本地保留）----
-migration/scripts/_test_attachment_autofetch.py
-
-# ---- 含真实业务数据的导出文件（组件ID / 表单源码等，勿入库）----
+# ---- 本地宜搭字段快照（含真实 componentId，本地保留）----
 varName_componentId_对应表.csv
 varName_componentId_对应表.html
 表单源码
+
+# ---- 建设过程文档（本地保留，不入库）----
+docs/audit-report.md
+docs/audit-efficiency-report.md
+docs/implementation-plan.md
+docs/frontend-refactor-plan.md
 
 # ---- 内部 API 参考文档（第三方平台文档，勿入库）----
 需要的API及辅助说明文件/

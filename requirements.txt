@@ -1,3 +1,5 @@
 flask>=3.0
 waitress>=3.0
 requests>=2.31
+# 可选：地址字段(AddressField)迁移时生成 regionText 的 en_US 拼音，未安装时回退为中文原文
+pypinyin>=0.50

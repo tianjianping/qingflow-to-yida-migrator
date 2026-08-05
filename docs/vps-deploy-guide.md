@@ -137,7 +137,7 @@ scp migration/vps/attachment_server.py <vps>:D:/yida-svc/attachment_server.py
 优先级：**环境变量 > `config/credentials.json`（attachment_storage 段）> 启动时报错**。
 
 - 环境变量方式（推荐，Windows 服务场景在 nssm 的 Environment 里配置）：
-  - `YIDA_FILES_ROOT`：附件存储根目录（默认 `D:\yida-attachments`）
+  - `YIDA_FILES_ROOT`：附件存储根目录（默认 `~/yida-attachments`，即当前用户主目录下）
   - `YIDA_VPS_UPLOAD_TOKEN`：上传鉴权 Token（与迁移脚本端 `credentials.json` 的 `attachment_storage.upload_token` 保持一致）
   - `YIDA_FILES_DOMAIN`：公网域名前缀，如 `https://files.your-domain.com`（不含末尾斜杠）
 - 配置文件方式：在服务程序目录或上级目录放置 `config/credentials.json`，写入 `attachment_storage` 段的 `upload_token` / `endpoint`。
@@ -265,7 +265,7 @@ netsh advfirewall firewall add rule name="Caddy HTTPS" dir=in action=allow proto
 
 | 测试项 | URL | 预期结果 |
 |--------|-----|----------|
-| Health Check | `https://<your-domain>/upload/health` | `{"status":"ok","root":"D:\\yida-attachments",...}` |
+| Health Check | `https://<your-domain>/upload/health` | `{"status":"ok","root":"~/yida-attachments",...}` |
 | 文件访问 | `https://<your-domain>/files/test.txt` | 如果有文件则返回内容，否则 404 |
 | HTTPS | 浏览器地址栏 | 显示锁图标（Let's Encrypt 已签发） |
 

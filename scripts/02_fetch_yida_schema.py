@@ -2,10 +2,15 @@
 """步骤2：拉取宜搭表单组件定义 -> data/raw/<表单名>_宜搭组件.json，并生成映射草稿 CSV
 接口文档: 获取表单内的组件信息 (GET /v1.0/yida/forms/formFields)
 用法: python 02_fetch_yida_schema.py <表单配置名> [--no-draft]
+
+前置要求: 宜搭目标表单须在宜搭设计器中手动创建（宜搭不提供创建表单定义的 API），
+且字段标题(label) 需与轻流字段名(queTitle) 完全一致，自动映射(02b) 才能对齐。
+详细说明见 docs/宜搭表单准备说明.md。
 """
 import csv
 import json
 import sys
+import time
 import urllib.parse
 from common import (load_credentials, load_form_config, http_request, save_json,
                     get_dingtalk_token, yida_context, require_non_placeholder,
@@ -76,14 +81,59 @@ def flatten_components(result):
     return walk(result or [])
 
 
+def write_draft(draft_path, flat):
+    """生成映射草稿 CSV（含子表单子组件、附件/成员备注）。"""
+    with open(draft_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["componentId", "宜搭字段名", "componentName", "组件类型中文",
+                    "是否子组件", "父组件componentId", "轻流queId", "轻流字段名",
+                    "transform", "behavior", "备注"])
+        for c in flat:
+            cn = COMPONENT_CN.get(c["componentName"], "")
+            note = ""
+            if c["componentName"] == "TableField":
+                note = "子表单：其 children 已展开为下方子组件行"
+            elif c["componentName"] in ("ImageField", "AttachmentField"):
+                note = "附件/图片：由 03b_attachment.py 独立阶段迁移（主管线跳过）"
+            elif c["componentName"] == "EmployeeField":
+                note = "成员：需钉钉 userId 映射"
+            w.writerow([c["fieldId"], c["label"], c["componentName"], cn,
+                        "Y" if c["isSub"] else "N", c["parentId"],
+                        "", "", "", c["behavior"], note])
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.exit("用法: python 02_fetch_yida_schema.py <表单配置名> [--no-draft]")
+        sys.exit("用法: python 02_fetch_yida_schema.py <表单配置名> [--no-draft] [--force]")
     form_name = sys.argv[1]
     make_draft = "--no-draft" not in sys.argv[1:]
+    force = "--force" in sys.argv[1:]
 
     cred = load_credentials()
     cfg = load_form_config(form_name)
+
+    # 本地缓存：宜搭表单结构在 TTL 内复用，减少重复 API 调用（--force 强制刷新）
+    cache_path = DATA_DIR / "raw" / f"{form_name}_宜搭组件.json"
+    meta_path = DATA_DIR / "raw" / f"{form_name}_宜搭组件.meta.json"
+    TTL_SECONDS = 1800  # 30 分钟
+
+    if not force and cache_path.exists() and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            fetched_at = float(meta.get("fetchedAt") or 0)
+            fresh = (time.time() - fetched_at) < TTL_SECONDS
+        except Exception:
+            fresh = False
+        if fresh:
+            print(f"[缓存] 宜搭表单结构 30 分钟内已拉取（{meta.get('fetchedAtText','')}），复用本地缓存: {cache_path}")
+            print(f"        如需强制刷新（宜搭表单结构已修改），请加 --force")
+            if make_draft:
+                result = json.loads(cache_path.read_text(encoding="utf-8")).get("result") or []
+                flat = flatten_components(result)
+                print(f"共解析到 {len(flat)} 个组件（含子表单内子组件），其中子组件 {sum(1 for x in flat if x['isSub'])} 个")
+                draft = BASE_DIR / "mappings" / f"{form_name}_mapping_draft.csv"
+                write_draft(draft, flat)
+            return
 
     # 合并宜搭上下文（表单配置优先，凭证兜底）：appType/formUuid/systemToken/userId
     ctx = yida_context(cred, cfg)
@@ -112,8 +162,13 @@ def main():
     if not result:
         sys.exit(f"[错误] 未获取到组件定义，原始返回: {json.dumps(resp, ensure_ascii=False)}")
 
-    # 3) 保存全量原始组件
+    # 3) 保存全量原始组件 + 缓存 meta（供 TTL 内复用）
     save_json(DATA_DIR / "raw" / f"{form_name}_宜搭组件.json", resp)
+    save_json(DATA_DIR / "raw" / f"{form_name}_宜搭组件.meta.json", {
+        "fetchedAt": time.time(),
+        "fetchedAtText": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "componentCount": len(result),
+    })
 
     # 4) 拍平 + 生成映射草稿
     flat = flatten_components(result)
@@ -121,23 +176,7 @@ def main():
 
     if make_draft:
         draft = BASE_DIR / "mappings" / f"{form_name}_mapping_draft.csv"
-        with open(draft, "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["componentId", "宜搭字段名", "componentName", "组件类型中文",
-                        "是否子组件", "父组件componentId", "轻流queId", "轻流字段名",
-                        "transform", "behavior", "备注"])
-            for c in flat:
-                cn = COMPONENT_CN.get(c["componentName"], "")
-                note = ""
-                if c["componentName"] == "TableField":
-                    note = "子表单：其 children 已展开为下方子组件行"
-                elif c["componentName"] in ("ImageField", "AttachmentField"):
-                    note = "附件/图片：二期处理（需下载后重传）"
-                elif c["componentName"] == "EmployeeField":
-                    note = "成员：需钉钉 userId 映射"
-                w.writerow([c["fieldId"], c["label"], c["componentName"], cn,
-                            "Y" if c["isSub"] else "N", c["parentId"],
-                            "", "", "", c["behavior"], note])
+        write_draft(draft, flat)
         print(f"映射草稿已生成: {draft}")
         print("下一步: 对照 data/raw/<表单名>_轻流字段清单.json，在草稿里填写「轻流queId/轻流字段名/transform」")
     else:

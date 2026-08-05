@@ -1,6 +1,6 @@
 ﻿componentId,宜搭字段名,componentName,轻流queId,轻流字段名,transform,behavior,备注
 textField_xxxxxxxxx,客户名称,TextField,1000001,客户名称,text,NORMAL,
 textField_xxxxxxxxy,轻流数据ID,TextField,-17,数据ID,text,NORMAL,去重键：必须保留且不能写入宜搭
-attachmentField_xxxxxxx,附件截图,AttachmentField,1000002,附件截图,skip,NORMAL,附件/图片：需下载后重传（见附件迁移）
+attachmentField_xxxxxxx,附件截图,AttachmentField,1000002,附件截图,skip,NORMAL,附件：由 03b_attachment.py 独立阶段迁移（见 docs/attachment-migration-plan.md）
 dateField_xxxxxxxx,申请时间,DateField,2,申请时间,date,NORMAL,
 employeeField_xxxxxx,申请人,EmployeeField,1,申请人,employee,NORMAL,

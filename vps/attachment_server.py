@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """附件上传服务 —— 监听 127.0.0.1:8000，由 Caddy 反代 /upload
 
-部署位置: VPS 的 D:\\yida-svc\\attachment_server.py
-本文件是版本受控的权威版本，改动后同步到 VPS 并重启 YidaUpload 服务。
+部署位置: VPS 上部署本服务的目录（见 docs/vps-deploy-guide.md）
+本文件是版本受控的权威版本，改动后同步到 VPS 并重启上传服务。
 
 设计要点:
   1. 幂等：同路径 + 同大小视为已存在，直接返回已有 URL（不重复写盘）。
@@ -43,7 +43,8 @@ def _load_attachment_cfg():
 
 
 _att_cfg = _load_attachment_cfg()
-ROOT = os.environ.get("YIDA_FILES_ROOT") or r"D:\yida-attachments"
+ROOT = (os.environ.get("YIDA_FILES_ROOT")
+        or os.path.join(os.path.expanduser("~"), "yida-attachments"))
 UPLOAD_TOKEN = (os.environ.get("YIDA_VPS_UPLOAD_TOKEN")
                 or os.environ.get("YIDA_UPLOAD_TOKEN")
                 or _att_cfg.get("upload_token") or "待配置")

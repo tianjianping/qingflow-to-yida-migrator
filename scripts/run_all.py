@@ -13,6 +13,9 @@
   python run_all.py <表单配置名> --commit             # 全量真实写入宜搭
   python run_all.py <表单配置名> --commit --limit 5   # 仅试迁前 5 条
   python run_all.py <表单配置名> --force              # 02d 强制把已存在记录全部标记更新
+  python run_all.py <表单配置名> --skip-fetch         # 跳过阶段一「01 拉取轻流数据」(复用本地镜像)
+  python run_all.py <表单配置名> --force-fetch        # 阶段一「01」强制全量重拉(--full)，忽略增量水印
+  python run_all.py <表单配置名> --refresh-yida       # 「02」强制刷新宜搭结构(--force)，忽略本地缓存
 
 前置:
   - config/表单对照表.csv 已加该表单行（轻流appKey + 宜搭formUuid）
@@ -103,10 +106,13 @@ def show_resume_hint(form):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("用法: python run_all.py <表单配置名> [--commit] [--limit N] [--force]")
+        sys.exit("用法: python run_all.py <表单配置名> [--commit] [--limit N] [--force] [--skip-fetch] [--force-fetch]")
     form = sys.argv[1]
     commit = "--commit" in sys.argv
     force = "--force" in sys.argv
+    skip_fetch = "--skip-fetch" in sys.argv
+    force_fetch = "--force-fetch" in sys.argv
+    refresh_yida = "--refresh-yida" in sys.argv
     limit_args = []
     if "--limit" in sys.argv:
         i = sys.argv.index("--limit")
@@ -117,8 +123,12 @@ def main():
 
     banner("阶段一 · 拉取（轻流数据 / 宜搭组件+字段对齐 / 宜搭存量）")
     run("00 生成表单配置", ["00_gen_form_configs.py"], form, "00")
-    run("01 拉取轻流数据", ["01_fetch_qingflow.py", form], form, "01")
-    run("02 拉取宜搭组件", ["02_fetch_yida_schema.py", form], form, "02")
+    if skip_fetch:
+        print("[开关] --skip-fetch: 跳过「01 拉取轻流数据」，直接复用本地镜像（轻流数据未变化时调试提速）")
+    else:
+        fetch_args = ["01_fetch_qingflow.py", form] + (["--full"] if force_fetch else [])
+        run("01 拉取轻流数据", fetch_args, form, "01")
+    run("02 拉取宜搭组件", ["02_fetch_yida_schema.py", form] + (["--force"] if refresh_yida else []), form, "02")
     run("02b 自动字段对齐", ["02b_automap.py", form], form, "02b")  # 不强制, 保护已存在的手工映射(如 skip 标记)
     run("02c 拉取宜搭存量", ["02c_fetch_yida_instances.py", form], form, "02c")
 

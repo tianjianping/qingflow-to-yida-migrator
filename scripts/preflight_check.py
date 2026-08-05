@@ -23,7 +23,7 @@ try:
 except Exception:
     pass
 
-from common import load_form_config, load_credentials, BASE_DIR, DATA_DIR
+from common import load_form_config, load_credentials, iter_json_array, BASE_DIR, DATA_DIR
 
 DEDUP_QUE_ID = "-17"
 MIN_EXPIRE_DAYS = 3
@@ -33,6 +33,155 @@ SECONDS_PER_DAY = 86400
 def check(level, category, title, detail="", suggestion=""):
     return {"level": level, "category": category, "title": title,
             "detail": detail, "suggestion": suggestion}
+
+
+def build_manual_worklist(form_name, cfg, rows, matched, unmatched):
+    """生成「宜搭手动搭建/调整工作清单」：需在宜搭设计器人工处理的待办列表。
+
+    每项 {action, field, detail}：
+      - 检查：宜搭字段未匹配轻流字段，需确认删除/改名/标 skip
+      - 新增：轻流有字段但宜搭无可承接字段，数据将被忽略
+      - 补建：必填系统字段（编号/数据ID）缺失
+      - 补充：子表单子组件未匹配（父子表单已启用）
+      - 配置：关联组件未在 config associations 登记
+    """
+    worklist = []
+    alias_cfg = cfg.get("labelAliases") or {}
+    qf_fields_path = DATA_DIR / "raw" / f"{form_name}_轻流字段清单.json"
+    qf_fields = json.loads(qf_fields_path.read_text(encoding="utf-8")) if qf_fields_path.exists() else []
+
+    def _qid_str(v):
+        return "" if v is None else str(v)
+
+    # 已承接的轻流 queId（映射表已匹配 + 系统字段）
+    matched_qids = set()
+    for r in matched:
+        qid = str(r.get("轻流queId", "") or "").strip()
+        if qid:
+            matched_qids.add(qid)
+
+    # 轻流重名字段（同标题多个 queId）：标题匹配无法一一对应，需人工核对
+    qf_title_qids = {}
+    for qf in qf_fields:
+        if qf.get("parentQueId"):
+            continue
+        t = (qf.get("queTitle") or "").strip()
+        if t:
+            qf_title_qids.setdefault(t, []).append(_qid_str(qf.get("queId")))
+    dup_qf_titles = {t for t, qids in qf_title_qids.items() if len(qids) > 1}
+
+    # 1) 未匹配的宜搭字段 -> 检查/删除/改名
+    for r in unmatched:
+        yida_name = r.get("宜搭字段名", "?")
+        cid = r.get("componentId", "?")
+        worklist.append({
+            "action": "检查",
+            "field": yida_name,
+            "detail": f"宜搭字段「{yida_name}」(componentId={cid}) 未匹配到轻流字段。"
+                      f"请核对宜搭字段标题与轻流字段名是否一致（含别名配置 labelAliases）；"
+                      f"若该字段无需迁移请在 mapping.csv 标 skip。",
+        })
+
+    # 2) 轻流有字段、宜搭无可承接 -> 在宜搭新增
+    sys_que_ids = {"0", "-17", "1", "2"}
+    for qf in qf_fields:
+        if qf.get("parentQueId"):
+            continue  # 子表单子字段单独处理
+        qid = _qid_str(qf.get("queId"))
+        title = (qf.get("queTitle") or "").strip()
+        if not title or qid in matched_qids or qid in sys_que_ids:
+            continue
+        # 已被别名承接的宜搭标题不再要求新增
+        if qid in {str(v) for v in alias_cfg.values()}:
+            continue
+        # 轻流重名字段：自动匹配无法一一对应，归入「检查」而非「新增」
+        if title in dup_qf_titles:
+            continue
+        worklist.append({
+            "action": "新增",
+            "field": title,
+            "detail": f"轻流字段「{title}」(queId={qid}, 类型 {qf.get('queType')}) 在宜搭无同名/别名可承接字段，"
+                      f"该字段数据将被忽略。如需迁移请在宜搭创建标题为「{title}」的字段（或配置 labelAliases 别名）后重新运行 02b。",
+        })
+
+    # 3) 必填系统字段缺失（编号 queId=0 / 数据ID queId=-17）
+    for r in rows:
+        if str(r.get("轻流queId", "") or "").strip() in ("0", DEDUP_QUE_ID):
+            matched_qids.add(str(r.get("轻流queId", "")).strip())
+    if "0" not in matched_qids:
+        worklist.append({"action": "补建", "field": "编号",
+                         "detail": "定位键「编号」未映射（轻流 queId=0）。请在宜搭创建标题为「编号」的 TextField 后重新运行 02b。"})
+    if DEDUP_QUE_ID not in matched_qids:
+        worklist.append({"action": "补建", "field": "数据ID",
+                         "detail": "跨系统匹配键「数据ID」未映射（轻流 queId=-17）。请在宜搭创建标题为「数据ID」的 TextField 后重新运行 02b。"})
+
+    # 4) 子表单子组件未匹配（父 TableField 已启用、子组件 skip）
+    for r in rows:
+        note = r.get("备注", "") or ""
+        if "子表单子组件" in note and "未匹配" in note and not r.get("轻流queId"):
+            worklist.append({
+                "action": "补充",
+                "field": r.get("宜搭字段名", "?"),
+                "detail": f"子表单子组件「{r.get('宜搭字段名')}」未匹配轻流子字段。"
+                          f"请在宜搭子表单中确认该子组件的标题与轻流子表单内的子字段标题一致。",
+            })
+
+    # 5) 关联组件未在 config associations 登记
+    assoc_cfg = cfg.get("associations") or {}
+    for r in rows:
+        if r.get("componentName") == "AssociationFormField" and r.get("componentId") \
+                and r.get("componentId") not in assoc_cfg and r.get("轻流queId"):
+            worklist.append({
+                "action": "配置",
+                "field": r.get("宜搭字段名", "?"),
+                "detail": f"关联组件「{r.get('宜搭字段名')}」(componentId={r.get('componentId')}) 未在表单 config 的 associations 段登记 "
+                          f"targetForm/titleField，转换时该关联字段将为空。请补充 config 后重跑 02b/03。",
+            })
+
+    # 6) 重复承接：同一轻流字段映射到多个宜搭字段（如同名+别名并存），数据冗余需人工确认
+    que_id_count = {}
+    for r in matched:
+        qid = str(r.get("轻流queId", "") or "").strip()
+        if qid and qid != DEDUP_QUE_ID:
+            que_id_count.setdefault(qid, []).append(r.get("宜搭字段名", "?"))
+    for qid, names in que_id_count.items():
+        if len(names) > 1:
+            worklist.append({
+                "action": "检查",
+                "field": "、".join(names),
+                "detail": f"轻流字段 queId={qid} 同时映射到 {len(names)} 个宜搭字段（{'、'.join(names)}）。"
+                          f"同一值会写入多个字段（常见于同名与别名并存，如「省/自治区/直辖市」与「省」）。"
+                          f"请确认是否需要，建议在宜搭删除冗余字段或保留其一。",
+            })
+
+    # 7) 轻流顶层重名字段（如两个「电话」）：提示项，不阻断迁移。
+    #    子表单内与顶层同名字段（parentQueId 非空）属正常现象，不计入。
+    #    若 mapping 已将该标题的每个顶层重名 queId 都承接，则无需提示。
+    for t in sorted(dup_qf_titles):
+        qids = qf_title_qids[t]
+        # mapping 中已承接该标题的顶层行（排除子表单子组件行）
+        mapped_qids = set()
+        for r in rows:
+            if (r.get("宜搭字段名", "") == t) and r.get("componentId") \
+                    and "子表单子组件" not in (r.get("备注") or ""):
+                qid = str(r.get("轻流queId", "") or "").strip()
+                if qid:
+                    mapped_qids.add(qid)
+        uncovered = [q for q in qids if q not in mapped_qids]
+        if not uncovered:
+            continue  # 全部承接，无需手工操作
+        chosen = sorted(mapped_qids)
+        worklist.append({
+            "action": "检查",
+            "field": t,
+            "detail": f"轻流顶层存在 {len(qids)} 个同名「{t}」字段（queId={'、'.join(qids)}），"
+                      f"mapping 已承接 {'、'.join(chosen) or '无'}，另有 {len(uncovered)} 个未承接"
+                      f"（queId={'、'.join(uncovered)}），其数据将被忽略。"
+                      f"子表单内与顶层同名字段属正常现象，不计入。"
+                      f"提示项不阻断迁移：若未承接字段为冗余副本（值已被承接字段覆盖）可忽略；"
+                      f"如需迁移，请在 mapping.csv 为该 queId 增加一行或改选承接字段。",
+        })
+    return worklist
 
 
 def run(form_name):
@@ -145,34 +294,43 @@ def run(form_name):
         checks.append(check("error", "源数据", "轻流源数据不存在",
                             f"{raw_path}", "请先运行 01_fetch_qingflow.py 拉取数据"))
     else:
-        raw = json.loads(raw_path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            raw = raw.get("result", {}).get("result", [])
-        if not raw:
+        # 流式遍历（内存 O(单条)），统计空数据ID 记录数
+        try:
+            src_iter = iter_json_array(raw_path)
+        except Exception:
+            try:
+                raw = json.loads(raw_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    raw = raw.get("result", {}).get("result", [])
+                src_iter = iter(raw)
+            except Exception:
+                src_iter = iter(())
+        empty_did = 0
+        total = 0
+        for apply in src_iter:
+            total += 1
+            found = False
+            for a in (apply.get("answers") or []):
+                if str(a.get("queId")) == DEDUP_QUE_ID:
+                    v = None
+                    vals = a.get("values")
+                    if isinstance(vals, list) and vals:
+                        v = vals[0].get("value") or vals[0].get("dataValue") if isinstance(vals[0], dict) else vals[0]
+                    else:
+                        v = a.get("value") or a.get("dataValue")
+                    if v in (None, "", "null"):
+                        empty_did += 1
+                    found = True
+                    break
+            if not found:
+                empty_did += 1
+        if total == 0:
             checks.append(check("warn", "源数据", "轻流源数据为空（0 条记录）",
                                 "", "检查轻流 appKey 是否正确，或该应用是否确实无数据"))
-        else:
-            empty_did = 0
-            for apply in raw:
-                found = False
-                for a in (apply.get("answers") or []):
-                    if str(a.get("queId")) == DEDUP_QUE_ID:
-                        v = None
-                        vals = a.get("values")
-                        if isinstance(vals, list) and vals:
-                            v = vals[0].get("value") or vals[0].get("dataValue") if isinstance(vals[0], dict) else vals[0]
-                        else:
-                            v = a.get("value") or a.get("dataValue")
-                        if v in (None, "", "null"):
-                            empty_did += 1
-                        found = True
-                        break
-                if not found:
-                    empty_did += 1
-            if empty_did:
-                checks.append(check("warn", "源数据", f"{empty_did} 条轻流记录数据ID(queId=-17)为空或缺失",
-                                    f"共 {len(raw)} 条，其中 {empty_did} 条无有效数据ID",
-                                    "这些记录会被按新建处理，可能重复创建。建议先在轻流补全数据ID"))
+        elif empty_did:
+            checks.append(check("warn", "源数据", f"{empty_did} 条轻流记录数据ID(queId=-17)为空或缺失",
+                                f"共 {total} 条，其中 {empty_did} 条无有效数据ID",
+                                "这些记录会被按新建处理，可能重复创建。建议先在轻流补全数据ID"))
 
     # ---- 4. 宜搭存量检查 ----
     yida_path = DATA_DIR / "raw" / f"{form_name}_yida_instances.json"
@@ -277,13 +435,23 @@ def run(form_name):
 
     # ---- 8. 附件URL过期检查（仅 peek 模式有产物时） ----
     if att_que_ids and raw_path.exists():
-        import time
-        raw = json.loads(raw_path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            raw = raw.get("result", {}).get("result", [])
+        import time, urllib.parse
         now = time.time()
         expiring = 0
-        for apply in raw[:200]:  # 抽样前 200 条
+        # 流式读取，仅抽样前 200 条（内存 O(单条)）
+        try:
+            src_iter = iter_json_array(raw_path)
+        except Exception:
+            try:
+                raw = json.loads(raw_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    raw = raw.get("result", {}).get("result", [])
+                src_iter = iter(raw)
+            except Exception:
+                src_iter = iter(())
+        for idx, apply in enumerate(src_iter):
+            if idx >= 200:
+                break
             for a in (apply.get("answers") or []):
                 if str(a.get("queId")) in att_que_ids:
                     vals = a.get("values") or []
@@ -291,7 +459,6 @@ def run(form_name):
                         url = (v.get("value") or v.get("dataValue") or "") if isinstance(v, dict) else str(v)
                         if url and "expire" in url.lower():
                             # 尝试解析 expire 参数
-                            import urllib.parse
                             params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
                             exp_str = params.get("expire", params.get("expires", [""]))[0]
                             try:
@@ -344,12 +511,18 @@ def run(form_name):
     if qf_fields_path.exists():
         qf_fields = json.loads(qf_fields_path.read_text(encoding="utf-8"))
         qf_titles = {(f.get("queTitle") or "").strip() for f in qf_fields if f.get("queTitle")}
-        # 检查映射表中的 queId 是否在轻流字段清单中存在
+        # 检查映射表中的 queId 是否在轻流字段清单中存在。
+        # 清单已含子表单子字段（parentQueId 非空，01 collect_fields 收集），一并纳入合法集。
         qf_que_ids = {str(f.get("queId")) for f in qf_fields if f.get("queId") is not None}
         orphan_que = set()
         for r in matched:
             qid = r.get("轻流queId", "")
             if qid and qid != DEDUP_QUE_ID and qid not in qf_que_ids:
+                # 子表单子组件行豁免：子字段只存在于轻流 tableValues 行内，
+                # 若本地是旧清单（未重跑 01 收集子字段），由 02b load_qingflow_subfields 兜底，
+                # 不应误报为"字段被删除"
+                if "子表单子组件" in (r.get("备注") or ""):
+                    continue
                 orphan_que.add(f"{r.get('宜搭字段名', '?')}(queId={qid})")
         if orphan_que:
             checks.append(check("warn", "轻流字段", f"{len(orphan_que)} 个映射的 queId 在轻流字段清单中不存在",
@@ -357,7 +530,8 @@ def run(form_name):
                                 "可能轻流表单已修改/删除了该字段，请重新拉取轻流数据或更新映射表"))
 
     # ---- 汇总 ----
-    return checks
+    worklist = build_manual_worklist(form_name, cfg, rows, matched, unmatched)
+    return checks, worklist
 
 
 def main():
@@ -366,7 +540,7 @@ def main():
         sys.exit(1)
     form_name = sys.argv[1]
     try:
-        results = run(form_name)
+        results, worklist = run(form_name)
         errors = [c for c in results if c["level"] == "error"]
         warnings = [c for c in results if c["level"] == "warn"]
         infos = [c for c in results if c["level"] == "info"]
@@ -377,12 +551,55 @@ def main():
                 "warnings": len(warnings),
                 "infos": len(infos),
                 "total": len(results),
+                "worklist": len(worklist),
             },
+            "worklist": worklist,
             "checks": results,
         }, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"ok": False, "msg": f"预检失败: {e}"}, ensure_ascii=False))
         sys.exit(1)
+
+
+def render_worklist_md(form_name, worklist, summary, check_count=None):
+    """把「宜搭手动调整工作清单」渲染为 Markdown 文本（含表单基本信息）。
+
+    供保存为本地 md 文件 / 一键复制使用。
+    """
+    from datetime import datetime
+    lines = []
+    lines.append("# 宜搭手动调整工作清单")
+    lines.append("")
+    lines.append(f"- **表单**：{form_name}")
+    lines.append(f"- **生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"- **预检摘要**：{summary.get('errors', 0)} 个错误 / "
+                 f"{summary.get('warnings', 0)} 个警告 / {summary.get('infos', 0)} 个提示")
+    if check_count:
+        lines.append(f"- **检查项**：共 {check_count} 条")
+    lines.append("")
+    if not worklist:
+        lines.append("> 当前无需手动调整宜搭表单。")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append(f"共 {len(worklist)} 项待处理，请按以下顺序在宜搭设计器中人工调整后，"
+                 "重新执行「拉取数据」（勾选刷新宜搭结构）+「格式化数据」。")
+    lines.append("")
+    lines.append("| # | 动作 | 字段 | 说明 |")
+    lines.append("|---|------|------|------|")
+    for i, w in enumerate(worklist, 1):
+        detail = (w.get("detail") or "").replace("\n", " ")
+        lines.append(f"| {i} | {w.get('action', '')} | {w.get('field', '')} | {detail} |")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("### 动作含义")
+    lines.append("")
+    lines.append("- **检查**：宜搭字段未匹配到轻流字段 / 存在重名或重复承接，需人工确认删除、改名或标 skip。")
+    lines.append("- **新增**：轻流有字段但宜搭无可承接字段，需在宜搭创建对应字段（标题与轻流字段名一致），或配置 labelAliases 别名。")
+    lines.append("- **补建**：必填定位键（编号/数据ID）缺失，需在宜搭创建对应 TextField。")
+    lines.append("- **补充**：子表单子组件未匹配轻流子字段，需核对宜搭子组件标题。")
+    lines.append("- **配置**：关联组件未在表单 config 的 associations 段登记 targetForm/titleField。")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

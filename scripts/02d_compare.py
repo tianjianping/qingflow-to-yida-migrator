@@ -36,6 +36,17 @@ except Exception:
 from common import load_form_config, load_json, save_json, DATA_DIR
 
 
+def _file_fp(path):
+    """文件的轻量指纹 (mtime_ns, size)，用于判断产物是否被重写。"""
+    if not path.exists():
+        return None
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def src_hash(apply):
     """轻流原始记录的稳定指纹（任何字段变化都会体现）。"""
     return hashlib.md5(
@@ -90,6 +101,27 @@ def main():
     raw_path = DATA_DIR / "raw" / f"{form_name}_raw.json"
     if not raw_path.exists():
         sys.exit(f"[缺产物] {raw_path} 不存在 —— 请先执行阶段一（01 拉取轻流数据）")
+    yida_path = DATA_DIR / "raw" / f"{form_name}_yida_instances.json"
+    if not yida_path.exists():
+        sys.exit(f"[缺产物] {yida_path} 不存在 —— 请先执行阶段一（02c 拉取宜搭存量）")
+
+    # B2: 输入指纹未变时直接复用既有差异清单，跳过全量对比。
+    # 01 增量无变更不重写 raw、02c 增量无变更不重写存量 -> 两者指纹均不变，
+    # 对比从秒级降到毫秒级。任一输入变化（或 --force）都强制重算。
+    diff_path = DATA_DIR / "diff" / f"{form_name}_diff.json"
+    if not force and diff_path.exists():
+        try:
+            prev = load_json(diff_path)
+        except Exception:
+            prev = None
+        if isinstance(prev, dict) and prev.get("srcCount") is not None:
+            cur = {"raw": _file_fp(raw_path), "yida": _file_fp(yida_path)}
+            if prev.get("inputFingerprint") == cur:
+                print(f"[快速跳过] raw 与宜搭存量均未变化，复用既有差异清单（生成于 {prev.get('generatedAt')}）")
+                print(f"  待新建 {len(prev.get('create') or [])} | 待更新 {len(prev.get('update') or [])} | "
+                      f"跳过(无变化) {len(prev.get('skip') or [])}")
+                return
+
     raw = load_json(raw_path)
     src_did, src_hash_map = {}, {}
     for apply in raw:
@@ -98,9 +130,6 @@ def main():
         src_hash_map[aid] = src_hash(apply)
 
     # 2) 宜搭真实存量（阶段一 / 02c）：按 轻流数据ID 建索引（存在性权威 = 数据ID）
-    yida_path = DATA_DIR / "raw" / f"{form_name}_yida_instances.json"
-    if not yida_path.exists():
-        sys.exit(f"[缺产物] {yida_path} 不存在 —— 请先执行阶段一（02c 拉取宜搭存量）")
     yida = load_json(yida_path)
     existing = yida.get("existing") or {}
     did_to_inst = yida.get("didToInst") or {d: i for i, d in existing.items() if d}
@@ -180,6 +209,8 @@ def main():
         # P2-1: 只保留差异集的指纹，避免大表单 diff.json 膨胀（04 只用 create+update 的指纹）
         "srcHash": {aid: src_hash_map[aid]
                     for aid in set(create) | set(update) if aid in src_hash_map},
+        # B2: 记录输入产物指纹，下次对比时指纹未变则直接复用本清单
+        "inputFingerprint": {"raw": _file_fp(raw_path), "yida": _file_fp(yida_path)},
         "force": force,
     }
     out = DATA_DIR / "diff" / f"{form_name}_diff.json"

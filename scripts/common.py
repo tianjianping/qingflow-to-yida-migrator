@@ -12,6 +12,8 @@ except Exception:
     pass
 import urllib.request
 import urllib.error
+import threading
+from urllib.parse import urlencode
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # migration/
@@ -21,6 +23,9 @@ DATA_DIR = BASE_DIR / "data"
 DINGTALK_API = "https://api.dingtalk.com"
 
 _last_request_ts = 0.0
+# C2: 附件任务并发后 http_request 会被多线程调用，限速判定必须加锁，
+# 否则多线程会同时越过限速窗口突刺 API（429）。
+_request_lock = threading.Lock()
 
 
 # 环境变量 -> credentials 路径的覆盖表（P2-7 凭证安全）
@@ -32,16 +37,87 @@ _ENV_OVERRIDES = {
     "YIDA_SYSTEM_TOKEN":      ("yida", "systemToken"),
     "YIDA_VPS_UPLOAD_TOKEN":  ("attachment_storage", "upload_token"),
 }
+# 公开引用：供 Web 服务端/前端提示「某字段由环境变量提供」。
+ENV_OVERRIDES = dict(_ENV_OVERRIDES)
+
+# 凭证页可配置的全部字段（分区, 字段, 是否敏感, 对应环境变量或 None）
+# 敏感字段在脱敏模式下只显示末 4 位；非敏感字段（baseUrl/userId/endpoint 等）可显示完整值。
+CREDENTIAL_FIELDS = [
+    ("qingflow", "accessToken", True,  "QINGFLOW_ACCESS_TOKEN"),
+    ("qingflow", "baseUrl",     False, None),
+    ("qingflow", "userId",      False, None),
+    ("dingtalk", "appKey",      True,  "DINGTALK_APP_KEY"),
+    ("dingtalk", "appSecret",   True,  "DINGTALK_APP_SECRET"),
+    ("yida", "systemToken",     True,  "YIDA_SYSTEM_TOKEN"),
+    ("yida", "appType",         False, None),
+    ("yida", "userId",          False, None),
+    ("attachment_storage", "endpoint",     False, None),
+    ("attachment_storage", "upload_url",   False, None),
+    ("attachment_storage", "upload_token", True,  "YIDA_VPS_UPLOAD_TOKEN"),
+    ("attachment_storage", "local_cache",  False, None),
+]
 
 
-def load_credentials():
-    with open(CONFIG_DIR / "credentials.json", encoding="utf-8") as f:
-        cred = json.load(f)
+def load_credentials(required=True):
+    """加载 credentials.json 并应用环境变量覆盖。
+
+    required=True（默认，管线脚本用）：文件缺失/损坏时抛出明确异常；
+    required=False（网页首次配置用）：文件缺失/损坏时返回空分区 dict，
+    由调用方按未配置处理，不抛裸异常。"""
+    path = CONFIG_DIR / "credentials.json"
+    cred = {}
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            cred = json.load(f)
+    elif required:
+        raise FileNotFoundError(f"凭证文件不存在: {path}")
+    if not isinstance(cred, dict):
+        if required:
+            raise ValueError(f"凭证文件格式错误（应为 JSON 对象）: {path}")
+        cred = {}
     for env_key, (section, field) in _ENV_OVERRIDES.items():
         val = os.environ.get(env_key, "").strip()
         if val:
             cred.setdefault(section, {})[field] = val
     return cred
+
+
+def save_credentials(cred):
+    """原子保存凭证到 credentials.json（网页凭证配置用）。"""
+    save_json(CONFIG_DIR / "credentials.json", cred)
+
+
+def credential_summary(cred, redact=False):
+    """生成凭证脱敏摘要，供网页「凭证」页展示。
+
+    返回 {section: {field: {configured, source, envVar, value}}}：
+      - configured: 是否已配置有效值；
+      - source: env（环境变量覆盖）| file（credentials.json）| none；
+      - envVar: 覆盖该字段的环境变量名（无则空串）；
+      - value: redact=True 时敏感字段仅给末 4 位（保留首位），否则敏感字段完整值；
+               非敏感字段始终给完整值。"""
+    summary = {}
+    for section, field, sensitive, env_var in CREDENTIAL_FIELDS:
+        env_val = os.environ.get(env_var, "").strip() if env_var else ""
+        file_val = str((cred.get(section) or {}).get(field, "") or "").strip()
+        if env_val:
+            source, value = "env", env_val
+        elif file_val:
+            source, value = "file", file_val
+        else:
+            summary.setdefault(section, {})[field] = {
+                "configured": False, "source": "none", "envVar": env_var or "",
+                "value": "", "sensitive": sensitive}
+            continue
+        if sensitive and redact:
+            show = value[-4:] if len(value) > 4 else value
+            if len(value) > 4:
+                show = value[0] + "***" + value[-4:]
+            value = show
+        summary.setdefault(section, {})[field] = {
+            "configured": True, "source": source, "envVar": env_var or "",
+            "value": value, "sensitive": sensitive}
+    return summary
 
 
 def load_form_config(form_name):
@@ -65,20 +141,25 @@ def load_mapping(mapping_file):
     return rows
 
 
-def http_request(url, method="POST", headers=None, body=None, min_interval=0.25, max_retry=3):
-    """带限速与重试的 HTTP 请求，body 为 dict 时自动转 JSON"""
+def http_request(url, method="POST", headers=None, body=None, min_interval=0.25, max_retry=3, params=None):
+    """带限速与重试的 HTTP 请求，body 为 dict 时自动转 JSON；params 为 dict 时拼接到 URL 查询串。"""
     global _last_request_ts
     headers = dict(headers or {})
+    if params:
+        sep = "&" if "?" in url else "?"
+        url = url + sep + urlencode(params)
     data = None
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers.setdefault("Content-Type", "application/json")
 
     for attempt in range(1, max_retry + 1):
-        wait = min_interval - (time.time() - _last_request_ts)
-        if wait > 0:
-            time.sleep(wait)
-        _last_request_ts = time.time()
+        # 锁内 sleep：全局请求间隔 >= min_interval，多线程下限速依然成立
+        with _request_lock:
+            wait = min_interval - (time.time() - _last_request_ts)
+            if wait > 0:
+                time.sleep(wait)
+            _last_request_ts = time.time()
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
@@ -117,6 +198,105 @@ def get_dingtalk_token(cred):
     _token_cache["token"] = token
     _token_cache["expire_at"] = time.time() + int(resp.get("expireIn", 7200)) - 120
     return token
+
+
+def list_yida_forms(cred, app_idx=None, page=1, page_size=100, form_types=None):
+    """调用宜搭「获取指定应用下的表单列表」接口（GET /v1.0/yida/forms，分页）。
+
+    成功返回 {"ok": True, "forms": [{formUuid, title, formType}], "totalCount", "currentPage"}；
+    失败返回 {"ok": False, "msg": "..."}。任何异常都不抛出，供 Web 路由与 CLI 共用。
+    app_idx: yidaApps 下标；None 表示使用活跃应用（activeApp）。"""
+    try:
+        token = get_dingtalk_token(cred)
+    except SystemExit as e:
+        return {"ok": False, "msg": str(e.args[0]) if e.args else "获取钉钉 accessToken 失败"}
+    except Exception as e:
+        return {"ok": False, "msg": f"获取钉钉 accessToken 失败: {e}"}
+    apps = cred.get("yidaApps") or []
+    if not apps:
+        return {"ok": False, "msg": "尚未配置宜搭应用（yidaApps 为空），请先在「设置-宜搭应用」中配置"}
+    if app_idx is None:
+        app_idx = int(cred.get("activeApp", 0) or 0)
+    try:
+        app_idx = int(app_idx)
+    except (TypeError, ValueError):
+        return {"ok": False, "msg": f"宜搭应用下标无效: {app_idx}"}
+    if not (0 <= app_idx < len(apps)):
+        return {"ok": False, "msg": f"宜搭应用下标无效: {app_idx}"}
+    app = apps[app_idx]
+    app_type = str(app.get("appType", "")).strip()
+    system_token = str(app.get("systemToken", "")).strip()
+    user_id = str((cred.get("yida") or {}).get("userId", "")).strip()
+    if not app_type or not system_token:
+        return {"ok": False, "msg": f"宜搭应用「{app.get('name', '')}」的 appType/systemToken 未配置"}
+    if not user_id:
+        return {"ok": False, "msg": "yida.userId（宜搭操作人 userId）未配置"}
+    try:
+        page = max(1, int(page))
+        page_size = min(100, max(1, int(page_size)))
+    except (TypeError, ValueError):
+        page, page_size = 1, 100
+    params = {"appType": app_type, "systemToken": system_token, "userId": user_id,
+              "pageNumber": page, "pageSize": page_size}
+    if form_types:
+        params["formTypes"] = form_types
+    try:
+        resp = http_request(
+            f"{DINGTALK_API}/v1.0/yida/forms", method="GET",
+            headers={"x-acs-dingtalk-access-token": token},
+            params=params, min_interval=0)
+    except Exception as e:
+        return {"ok": False, "msg": f"宜搭接口调用失败: {e}"}
+    result = resp.get("result") or {}
+    forms = []
+    for f in result.get("data") or []:
+        title = f.get("title") or ""
+        if isinstance(title, dict):
+            title = title.get("zhCN") or title.get("enUS") or ""
+        forms.append({"formUuid": str(f.get("formUuid", "") or ""),
+                      "title": str(title or ""),
+                      "formType": str(f.get("formType", "") or "")})
+    return {"ok": True, "forms": forms,
+            "totalCount": result.get("totalCount", len(forms)),
+            "currentPage": result.get("currentPage", page)}
+
+
+def list_qingflow_apps(cred):
+    """调用轻流「获取工作区全部应用包信息」接口（GET {baseUrl}/tags?userId=）。
+
+    成功返回 {"ok": True, "tags": [{tagName, tagId, apps: [{appKey, appName}]}]}；
+    失败返回 {"ok": False, "msg"}。任何异常都不抛出。
+    注意：userId 为轻流成员 ID（必填），需在凭证页配置 qingflow.userId。"""
+    qf = cred.get("qingflow") or {}
+    base = str(qf.get("baseUrl", "")).strip().rstrip("/")
+    token = str(qf.get("accessToken", "")).strip()
+    user_id = str(qf.get("userId", "")).strip()
+    if not base:
+        return {"ok": False, "msg": "qingflow.baseUrl 未配置"}
+    if not token:
+        return {"ok": False, "msg": "qingflow.accessToken 未配置"}
+    if not user_id:
+        return {"ok": False, "msg": "qingflow.userId（轻流成员 ID）未配置，请在轻流后台个人中心获取"}
+    try:
+        resp = http_request(f"{base}/tags", method="GET",
+                            headers={"accessToken": token},
+                            params={"userId": user_id}, min_interval=0)
+    except Exception as e:
+        return {"ok": False, "msg": f"轻流接口调用失败: {e}"}
+    if resp.get("errCode") not in (0, None, ""):
+        return {"ok": False, "msg": f"轻流接口返回错误: {resp.get('errMsg') or resp.get('errCode')}"}
+    result = resp.get("result") or {}
+    tags = []
+    for tag in result.get("tagList") or []:
+        apps = []
+        for a in tag.get("appList") or []:
+            if a.get("appKey"):
+                apps.append({"appKey": str(a.get("appKey", "")),
+                             "appName": str(a.get("appName", "") or "")})
+        tags.append({"tagName": str(tag.get("tagName", "") or ""),
+                     "tagId": tag.get("tagId"),
+                     "apps": apps})
+    return {"ok": True, "tags": tags}
 
 
 def load_attachment_config(cred, local_mandatory=True):
@@ -250,3 +430,214 @@ def save_json(path, obj, quiet=False):
 def load_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def iter_json_array(path, chunk_size=1 << 20):
+    """流式迭代 JSON 顶层数组的每个元素，峰值内存 O(单条) 而非 O(整个文件)。
+
+    raw 镜像与 diff 清单均为顶层数组结构，用 json.JSONDecoder.raw_decode
+    逐条解码并 yield；已消费前缀会被裁剪，避免缓冲随文件增长。
+    文件损坏或非顶层数组时抛 ValueError / json.JSONDecodeError，
+    由调用方捕获后回退 load_json（本函数绝不吞异常）。
+
+    注意：轻流子表单 tableValues 等嵌套结构在元素内部，不影响边界判定。
+    """
+    dec = json.JSONDecoder()
+    buf = ""
+    pos = 0
+    with open(path, encoding="utf-8") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if chunk:
+                buf += chunk
+            s = buf[pos:]
+            while True:
+                i = 0
+                n = len(s)
+                while i < n and s[i] in " \t\r\n\ufeff":
+                    i += 1
+                if i >= n:
+                    break                       # 缓冲尾部为空白，继续读块
+                c = s[i]
+                if c == "[":
+                    pos += i + 1                # 跳过顶层左括号
+                    s = buf[pos:]
+                    continue
+                if c == "]":
+                    return                      # 顶层数组结束
+                if c == ",":
+                    pos += i + 1
+                    s = buf[pos:]
+                    continue
+                try:
+                    obj, end = dec.raw_decode(s, i)
+                except json.JSONDecodeError:
+                    break                       # 元素被截断，需要更多数据
+                yield obj
+                pos += end
+                s = buf[pos:]
+            if not chunk:
+                if buf[pos:].strip():
+                    raise ValueError(f"JSON 文件损坏或非顶层数组: {path}")
+                return
+            # 防内存膨胀：裁剪已消费前缀（保留余量给可能截断的元素）
+            if pos > chunk_size * 2:
+                buf = buf[pos:]
+                pos = 0
+
+
+def raw_fingerprint(form_name):
+    """raw 镜像的轻量指纹 (mtime_ns, size)，用于判断数据是否被重写。
+
+    01 增量模式无变更时不重写 raw，指纹不变；下游 02d/统计可据此
+    快速跳过重算，避免每次全量解析 390MB。返回 None 表示文件不存在。"""
+    p = DATA_DIR / "raw" / f"{form_name}_raw.json"
+    if not p.exists():
+        return None
+    try:
+        st = p.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def raw_stats_path(form_name):
+    return DATA_DIR / "raw" / f"{form_name}_stats.json"
+
+
+def load_raw_stats(form_name):
+    """读取 raw 统计快照；快照缺失、损坏或指纹不匹配时返回 None（调用方重算）。
+
+    指纹 (mtime_ns, size) 写入 JSON 后为数组，读取时需还原为 tuple 再比对。"""
+    p = raw_stats_path(form_name)
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    fp = d.get("rawFingerprint")
+    if fp is not None:
+        fp = tuple(fp)
+    if fp != raw_fingerprint(form_name):
+        return None
+    return d
+
+
+def save_raw_stats(form_name, stats):
+    """写 raw 统计快照；失败不致命（下次自动重算），但不静默——打印告警。"""
+    try:
+        save_json(raw_stats_path(form_name), stats, quiet=True)
+    except Exception as e:
+        print(f"[警告] raw 统计快照写盘失败: {e}")
+
+
+# ============================================================
+#  增量同步状态 + 轻流定向补拉（P1-8 / 增量拉取）
+# ============================================================
+def _fmt_ts(ts=None):
+    """格式化时间戳为轻流接口接受的 yyyy-MM-dd HH:mm:ss"""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts if ts is not None else time.time()))
+
+
+def _parse_ts(s):
+    try:
+        return time.mktime(time.strptime(str(s).strip(), "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def sync_state_path(form_name):
+    return DATA_DIR / "raw" / f"{form_name}_sync_state.json"
+
+
+def load_sync_state(form_name):
+    """读取增量同步状态；文件缺失/损坏时返回空 dict（调用方回退全量）。"""
+    p = sync_state_path(form_name)
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_sync_state(form_name, state):
+    """保存增量同步状态；写盘失败时抛出，由调用方告警并退出。
+
+    此前静默吞掉写盘失败，会造成「raw 已更新但水印未落盘」的中间态，
+    下次拉取被迫退化全量（P0-E1）。save_json 本身是原子写，失败只留无效
+    临时文件，不会损坏既有状态。"""
+    save_json(sync_state_path(form_name), state, quiet=True)
+
+
+def extract_update_time(apply):
+    """取轻流记录最新更新时间：优先 answers 中的 queId=3，回退 applyBaseInfo.lastUpdateTime。"""
+    for a in (apply.get("answers") or []):
+        if str(a.get("queId")) == "3":
+            vals = a.get("values") or []
+            if vals and isinstance(vals[0], dict):
+                v = vals[0].get("value") or vals[0].get("dataValue")
+                if v:
+                    return str(v)
+            v = a.get("value") or a.get("dataValue")
+            if v:
+                return str(v)
+            break
+    base = apply.get("applyBaseInfo") or {}
+    lu = base.get("lastUpdateTime")
+    if lu:
+        return str(lu).replace("T", " ")
+    return None
+
+
+def raw_cache_fresh(form_name, ttl_hours=24):
+    """raw 附件 URL 缓存是否仍在有效期内（默认 24h）。
+    返回 (fresh, expire_ts, age_sec)；expire_ts 取同步状态的 cacheExpireAt，
+    缺失时按 raw 文件 mtime + ttl 推算。"""
+    state = load_sync_state(form_name)
+    ts = _parse_ts(state.get("cacheExpireAt")) if state.get("cacheExpireAt") else None
+    raw_path = DATA_DIR / "raw" / f"{form_name}_raw.json"
+    if ts is None and raw_path.exists():
+        try:
+            ts = raw_path.stat().st_mtime + ttl_hours * 3600
+        except OSError:
+            ts = None
+    if ts is None:
+        return False, None, None
+    age = max(0, time.time() - (ts - ttl_hours * 3600))
+    return ts > time.time(), ts, age
+
+
+def fetch_qingflow_records_by_ids(form_name, apply_ids, page_size=100):
+    """按 applyId 列表定向重拉轻流记录（用于刷新过期附件 URL）。
+    分块调用 apply/filter 的 applyIds 参数；失败抛异常。"""
+    if not apply_ids:
+        return []
+    cred = load_credentials()
+    cfg = load_form_config(form_name)
+    qf = cred["qingflow"]
+    qf_cfg = cfg["qingflow"]
+    url = f"{qf['baseUrl']}/app/{qf_cfg['appKey']}/apply/filter"
+    headers = {"accessToken": qf["accessToken"]}
+    out = []
+    ids = [str(x) for x in apply_ids]
+    for i in range(0, len(ids), page_size):
+        chunk = ids[i:i + page_size]
+        body = {
+            "pageSize": page_size,
+            "pageNum": 1,
+            "type": qf_cfg.get("type", 8),
+            "applyIds": chunk,
+        }
+        resp = http_request(url, headers=headers, body=body, min_interval=0.25)
+        if resp.get("errCode") not in (0, "0", "", None):
+            raise RuntimeError(
+                f"轻流接口返回异常: errCode={resp.get('errCode')} errMsg={resp.get('errMsg')}")
+        result = resp.get("result") or {}
+        rows = result.get("result") or []
+        out.extend(rows)
+    return out

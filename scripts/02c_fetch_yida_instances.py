@@ -48,9 +48,13 @@ try:
 except Exception:
     pass
 from common import (load_credentials, load_form_config, http_request, load_json,
-                    save_json, get_dingtalk_token, yida_context, DATA_DIR, DINGTALK_API, BASE_DIR)
+                    save_json, get_dingtalk_token, yida_context, DATA_DIR, DINGTALK_API, BASE_DIR,
+                    load_sync_state)
+from form_type import detect_form_type, FORM_TYPE_LABEL
 
+# 普通表单: 查询/创建/更新走 forms/instances/*；流程表单走 processes/instances/*
 SCAN_URL = f"{DINGTALK_API}/v1.0/yida/forms/instances/search"
+PROCESS_LIST_URL = f"{DINGTALK_API}/v1.0/yida/processes/instances"
 PAGE_SIZE = 100      # 每页实例数上限(宜搭列表接口)
 MAX_PAGES = 500      # 分页上限保护(500页=5万条，超出即视为异常)
 SCAN_RETRY = 3       # 单页扫描失败后的额外重试次数（http_request 内部已有重试，此处为页级兜底）
@@ -70,10 +74,19 @@ def find_dedup_field(form_name):
 
 
 def extract_data_id(inst, dedup_cid):
-    """从单个宜搭实例按去重键组件取回 dataID 值。"""
+    """从单个宜搭实例按去重键组件取回 dataID 值。
+
+    兼容两种响应结构:
+      - 普通表单实例: formData: {cid: value} / instanceValue(JSON 字符串)
+      - 流程表单实例: 扁平 dict（processInstanceId + cid: value 直接平铺）
+    """
+    if not dedup_cid:
+        return None
     fd = inst.get("formData")
     if isinstance(fd, dict) and dedup_cid in fd and fd[dedup_cid] not in (None, ""):
         return str(fd[dedup_cid])
+    if dedup_cid in inst and inst[dedup_cid] not in (None, ""):
+        return str(inst[dedup_cid])
     iv = inst.get("instanceValue")
     if isinstance(iv, str) and iv:
         try:
@@ -89,8 +102,11 @@ def extract_data_id(inst, dedup_cid):
     return None
 
 
-def scan_all_instances(ctx, token):
+def scan_all_instances(ctx, token, form_type="normal"):
     """全量分页扫描宜搭实例。
+
+    普通表单走 POST /v1.0/yida/forms/instances/search（currentPage 分页）；
+    流程表单走 POST /v1.0/yida/processes/instances（pageNumber 分页，实例键为 processInstanceId）。
 
     返回 (insts: list[dict], unresolved: int, last_err: str|None)
     insts 为成功拉取的实例列表；unresolved 为扫描失败的页数（存在性未知）。
@@ -100,19 +116,32 @@ def scan_all_instances(ctx, token):
     last_err = None
     page = 1
     while page <= MAX_PAGES:
-        body = {
-            "formUuid": ctx["formUuid"],
-            "appType": ctx["appType"],
-            "systemToken": ctx["systemToken"],
-            "userId": ctx["userId"],
-            "currentPage": page,
-            "pageSize": PAGE_SIZE,
-            "searchCondition": "[]",  # 空条件 = 拉全量（实测必需，否则返回空）
-        }
+        if form_type == "process":
+            url = PROCESS_LIST_URL
+            body = {
+                "formUuid": ctx["formUuid"],
+                "appType": ctx["appType"],
+                "systemToken": ctx["systemToken"],
+                "userId": ctx["userId"],
+                "pageNumber": page,
+                "pageSize": PAGE_SIZE,
+                "searchFieldJson": {},
+            }
+        else:
+            url = SCAN_URL
+            body = {
+                "formUuid": ctx["formUuid"],
+                "appType": ctx["appType"],
+                "systemToken": ctx["systemToken"],
+                "userId": ctx["userId"],
+                "currentPage": page,
+                "pageSize": PAGE_SIZE,
+                "searchCondition": "[]",  # 空条件 = 拉全量（实测必需，否则返回空）
+            }
         resp = None
         for attempt in range(1, SCAN_RETRY + 1):
             try:
-                resp = http_request(SCAN_URL,
+                resp = http_request(url,
                                     headers={"x-acs-dingtalk-access-token": token},
                                     body=body, min_interval=0.3)
                 break
@@ -127,7 +156,7 @@ def scan_all_instances(ctx, token):
             unresolved_pages += 1
             # 不确定缺了哪些实例 -> 直接中断扫描，交由上游判定未解决
             break
-        data = resp.get("data") or []
+        data = resp.get("data") or (resp.get("result") or {}).get("data") or []
         insts.extend(data)
         if len(data) < PAGE_SIZE:
             break
@@ -138,10 +167,21 @@ def scan_all_instances(ctx, token):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("用法: python 02c_fetch_yida_instances.py <表单配置名> [--allow-partial]")
+        sys.exit("用法: python 02c_fetch_yida_instances.py <表单配置名> [--allow-partial]"
+                 " [--form-type normal|process|auto] [--force]")
     form_name = sys.argv[1]
     # 默认：有页存在性未知时以非零码退出，阻断管线（防止下游重复创建）
     allow_partial = "--allow-partial" in sys.argv
+    # 表单类型: auto=自动探测（config 覆盖 > 缓存 > 接口探测），也可显式指定
+    type_override = "auto"
+    if "--form-type" in sys.argv:
+        idx = sys.argv.index("--form-type")
+        if idx + 1 >= len(sys.argv):
+            sys.exit("[参数错误] --form-type 需要一个取值: normal | process | auto")
+        type_override = sys.argv[idx + 1].strip().lower()
+    if type_override not in ("normal", "process", "auto"):
+        sys.exit(f"[参数错误] --form-type 取值无效: {type_override}（可选 normal / process / auto）")
+    force_type = "--force" in sys.argv
 
     cred = load_credentials()
     cfg = load_form_config(form_name)
@@ -149,6 +189,14 @@ def main():
     for k in ("appType", "systemToken", "userId", "formUuid"):
         if not ctx.get(k):
             sys.exit(f"[配置缺失] 宜搭 {k} 未填写（请在 credentials.json 或 forms/{form_name}.json 配置）")
+
+    if type_override == "auto":
+        form_type, type_src = detect_form_type(form_name, force=force_type)
+    else:
+        form_type, type_src = type_override, "cli"
+    print(f"[表单类型] {form_name}: {FORM_TYPE_LABEL[form_type]}（来源 {type_src}）"
+          + ("" if form_type == "normal" else " —— 按流程表单接口扫描"))
+    inst_key = "processInstanceId" if form_type == "process" else "formInstanceId"
 
     dedup = find_dedup_field(form_name)
     dedup_cid = dedup[0] if dedup else None
@@ -158,15 +206,27 @@ def main():
         print("[警告] 未找到 轻流queId=-17(数据ID) 对应组件，将无法按数据ID 对账（全部源记录将被判为新建）")
 
     token = get_dingtalk_token(cred)
+    inst_path = DATA_DIR / "raw" / f"{form_name}_yida_instances.json"
+    # C3: 01 增量拉取无变更（lastPullCount==0）时，轻流源数据未变化，
+    # 宜搭存量也无需重扫 —— 复用既有存量文件（保持 mtime 不变），
+    # 与 02d 的 inputFingerprint 快速跳过形成闭环，整段准备零扫描。
+    if "--full" not in sys.argv and inst_path.exists():
+        try:
+            st = load_sync_state(form_name)
+        except Exception:
+            st = None
+        if st and st.get("lastPullCount") == 0:
+            print("[增量] 轻流源数据无变更（增量拉取 0 条），复用既有宜搭存量，跳过全量扫描")
+            return
     print("[扫描] 全量分页拉取宜搭实例（按数据ID 对账，不依赖本地台账）...")
-    insts, unresolved_pages, last_err = scan_all_instances(ctx, token)
+    insts, unresolved_pages, last_err = scan_all_instances(ctx, token, form_type=form_type)
     print(f"[扫描] 拉到 {len(insts)} 条宜搭实例")
 
     existing = {}       # instId -> dataID
     did_to_inst = {}    # 轻流数据ID -> 实例ID（重复数据ID 保留第一条并告警）
     dup_dids = []       # 同一数据ID 出现多条实例的清单
     for it in insts:
-        inst_id = it.get("formInstanceId")
+        inst_id = it.get(inst_key)
         if not inst_id:
             continue
         did = extract_data_id(it, dedup_cid) if dedup_cid else None
